@@ -1,0 +1,144 @@
+"""
+Tests for the EP pipeline: cell tracking and fluorescence extraction
+using nucleus + cell-body (Multi-Otsu) segmentation.
+
+Same validation as fluorescence_extractor_test but uses
+fluorescence_extraction_EP (nucleus/cell body segmentation and watershed).
+"""
+
+import pytest
+import numpy as np
+import os
+import repressilator_analysis as ra
+from repressilator_analysis import fluorescence_extraction_EP
+from test_utils import map_true_indices_to_tracks
+from scipy.optimize import linear_sum_assignment
+
+
+def test_track_cells_EP():
+    """
+    Test EP cell segmentation, tracking, and fluorescence extraction across time.
+
+    Validates:
+    1. Cell segmentation from phase contrast (Multi-Otsu + watershed), 80 cells per frame
+    2. Cell tracking consistency across timepoints
+    3. Position accuracy of tracked cell centroids (< 7 pixels error)
+    4. Fluorescence extraction accuracy for nuclear and cytoplasmic channels
+
+    Uses reference data to verify that:
+    - All 80 cells are detected in each frame
+    - Cell identities are maintained across timepoints
+    - Cell positions match ground truth within 7 pixels
+    - Fluorescence values match ground truth (mean < 5, std < 6)
+    """
+    intensity_dir = os.path.join(os.path.dirname(__file__), os.pardir, "images", "intensity")
+    phase_dir = os.path.join(os.path.dirname(__file__), os.pardir, "images", "phase")
+
+    timepoints, intensity_images, phase_images = ra.image_loader.load_timeseries(
+        intensity_dir, phase_dir
+    )
+    testdata_path = os.path.join(os.path.dirname(__file__), "testdata", "F_vs_amount.txt")
+    all_true_data = np.loadtxt(testdata_path)
+
+    test_images = {
+        "timepoints": timepoints,
+        "intensity_images": intensity_images,
+        "phase_images": phase_images,
+        "data": all_true_data,
+    }
+
+    # EP pipeline: returns (tracks_dict, labelled_images)
+    tracks = fluorescence_extraction_EP.track_cells_across_time(
+        test_images["phase_images"], min_cell_area=5
+    )
+    labelled_images = tracks[1]
+    new_tracks = [[] for _ in range(len(test_images["phase_images"]))]
+    for i in range(len(test_images["phase_images"])):
+        for key in tracks[0].keys():
+            for elem in tracks[0][key]:
+                if elem[0] == i:
+                    new_tracks[i].append({"cell_id": int(key), "centre": list(elem[2])})
+    tracks = new_tracks
+    extraction_tracks = labelled_images
+    actual_data = test_images["data"]
+    intensity_images = test_images["intensity_images"]
+
+    for i in range(len(tracks)):
+        positions = actual_data[i * 80 : (i + 1) * 80, 8:]
+        indices = list(actual_data[i * 80 : (i + 1) * 80, 6])
+        if len(tracks[i]) != 80:
+            raise ValueError(
+                f"At timepoint {i}, the number of cells in the segmented image is "
+                f"{len(tracks[i])}, not 80"
+            )
+
+        # Test cell tracking (positions)
+        current_mapping, current_backmapping, actual_cost_values = map_true_indices_to_tracks(
+            positions, indices, tracks[i]
+        )
+        errors = [x > 7 for x in actual_cost_values]
+        num_errors = len([x for x in errors if x is True])
+        if i == 0:
+            if any(errors):
+                raise ValueError(
+                    f"At the first timepoint, {num_errors} cell centres have been "
+                    "assigned incorrectly"
+                )
+            mapping = current_mapping
+            backmapping = current_backmapping
+        else:
+            for cell_id, true_idx in current_mapping.items():
+                if mapping.get(cell_id) != true_idx:
+                    expected_true_idx = mapping[cell_id]
+                    raise ValueError(
+                        f"At time {i}, cell_id {cell_id} has been incorrectly assigned "
+                        f"to true index {true_idx}, expected true index {expected_true_idx}"
+                    )
+            for j, distance in enumerate(actual_cost_values):
+                if distance > 7:
+                    true_idx = indices[j]
+                    cell_id = current_backmapping[true_idx]
+                    raise ValueError(
+                        f"At time {i}, cell_id {cell_id} (true position {positions[j]}) "
+                        f"has position error: {distance:.2f} pixels"
+                    )
+
+        # Test fluorescence extraction (EP)
+        results = fluorescence_extraction_EP.extract_nuclear_cytoplasmic(
+            intensity_images[i],
+            extraction_tracks[i],
+        )
+
+        if "cytoplasmic" in results[0]:
+            keys = ["nuclear", "cytoplasmic"]
+        elif "n_intensity" in results[0]:
+            keys = ["n_intensity", "c_intensity"]
+        else:
+            raise KeyError(
+                f"Expected fluorescence keys not found in segmented data. "
+                f"Available keys: {results[0].keys()}"
+            )
+
+        test_vals = np.column_stack((
+            np.array([s[keys[0]] for s in results]),
+            np.array([s[keys[1]] for s in results]),
+        ))
+        test_fs = actual_data[:, [0, 3]]
+
+        for j in range(2):
+            fluor_cost_matrix = np.abs(
+                test_vals[:, j][:, np.newaxis]
+                - test_fs[i * 80 : (i + 1) * 80, j][np.newaxis, :]
+            )
+            fluor_row_ind, fluor_col_ind = linear_sum_assignment(fluor_cost_matrix)
+            best_distances = [
+                fluor_cost_matrix[x] for x in zip(fluor_row_ind, fluor_col_ind)
+            ]
+
+            if np.mean(best_distances) > 5 or np.std(best_distances) > 6:
+                raise ValueError(
+                    f"At timepoint {i}, fluorescence value extraction in {keys[j]} "
+                    f"over distance threshold to true value "
+                    f"(mean difference {np.mean(best_distances)}, "
+                    f"s.d. {np.std(best_distances)})"
+                )
