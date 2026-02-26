@@ -29,10 +29,12 @@ class RepressilatorModel(pints.ForwardModel):
     - alpha0: Basal transcription rate
     - beta: Translation rate
     - hill: Hill coefficient (cooperativity)
+    - K_m: Repression threshold concentration in Hill term
+    - T_e: Expression timescale
     - mrna_half_life: mRNA half-life (minutes)
     - p_half_life: Protein half-life (minutes)
     """
-    _param_names=["alpha", "alpha0", "beta", "hill", "mrna_half_life", "p_half_life"]
+    _param_names=["alpha", "alpha0", "beta", "hill", "K_m", "T_e", "mrna_half_life", "p_half_life"]
     def __init__(self, times: np.ndarray):
         """
         Initialize the Repressilator model.
@@ -44,7 +46,7 @@ class RepressilatorModel(pints.ForwardModel):
 
     def n_parameters(self) -> int:
         """Return the number of model parameters."""
-        return 6  # [alpha, alpha0, beta, hill, mrna_half_life, p_half_life]
+        return 8  # [alpha, alpha0, beta, hill, K_m, T_e, mrna_half_life, p_half_life]
 
     def n_outputs(self) -> int:
         """Return the number of observable outputs."""
@@ -56,13 +58,22 @@ class RepressilatorModel(pints.ForwardModel):
         Simulate the Repressilator ODE system.
 
         Args:
-            parameters: Model parameters [alpha, alpha0, beta, hill, mrna_half_life, p_half_life]
+            parameters: Model parameters [alpha, alpha0, beta, hill, K_m, T_e, mrna_half_life, p_half_life]
             times: Time points for simulation
 
         Returns:
             Array of shape (n_times, n_outputs) with protein concentrations
         """
-        alpha, alpha0, beta, hill, mrna_half_life, p_half_life = parameters
+        # Backwards compatibility: allow legacy parameter vectors that omit K_m and/or T_e.
+        if len(parameters) == 6:
+            alpha, alpha0, beta, hill, mrna_half_life, p_half_life = parameters
+            K_m = 1.0
+            T_e = 1.0
+        elif len(parameters) == 7:
+            alpha, alpha0, beta, hill, K_m, mrna_half_life, p_half_life = parameters
+            T_e = 1.0
+        else:
+            alpha, alpha0, beta, hill, K_m, T_e, mrna_half_life, p_half_life = parameters
 
         # Convert half-lives to degradation rates: degradation_rate = ln(2) / half_life
         gamma_m = np.log(2) / mrna_half_life
@@ -77,12 +88,13 @@ class RepressilatorModel(pints.ForwardModel):
 
             # Hill function for repression
             def hill_repression(repressor_conc):
-                return alpha / (1 + (repressor_conc ** hill)) + alpha0
+                scaled = repressor_conc / K_m
+                return alpha / (1 + (scaled ** hill)) + alpha0
 
             # mRNA dynamics
-            dm1_dt = hill_repression(p3) - gamma_m * m1
-            dm2_dt = hill_repression(p1) - gamma_m * m2
-            dm3_dt = hill_repression(p2) - gamma_m * m3
+            dm1_dt = (hill_repression(p3) - gamma_m * m1) / T_e
+            dm2_dt = (hill_repression(p1) - gamma_m * m2) / T_e
+            dm3_dt = (hill_repression(p2) - gamma_m * m3) / T_e
 
             # Protein dynamics
             dp1_dt = beta * m1 - gamma_p * p1
@@ -115,7 +127,7 @@ def infer_parameters(
         method: Optimization method ('differential_evolution' or 'least_squares')
 
     Returns:
-        Best-fit parameters [alpha, alpha0, beta, hill, mrna_half_life, p_half_life]
+        Best-fit parameters [alpha, alpha0, beta, hill, K_m, T_e, mrna_half_life, p_half_life]
     """
     # Create model
     model = RepressilatorModel(times)
@@ -126,6 +138,8 @@ def infer_parameters(
         (0, 10),      # alpha0
         (0, 100),     # beta
         (1, 5),       # hill
+        (1, 1000),    # K_m
+        (1, 100),     # T_e
         (0.693, 69.3),  # mrna_half_life
         (6.93, 693),    # p_half_life
     ]
@@ -156,7 +170,7 @@ def infer_parameters(
 
     else:  # least_squares or other local methods
         # Initial guess
-        x0 = [100, 1, 10, 2, 6.93, 69.3]
+        x0 = [100, 1, 10, 2, 50, 30, 6.93, 69.3]
 
         result = minimize(
             cost_function,
@@ -167,7 +181,7 @@ def infer_parameters(
         )
         best_params = result.x
 
-    parameter_names = ['alpha', 'alpha0', 'beta', 'hill', 'mrna_half_life', 'p_half_life']
+    parameter_names = ['alpha', 'alpha0', 'beta', 'hill', 'K_m', 'T_e', 'mrna_half_life', 'p_half_life']
 
     print("\nBest-fit parameters:")
     for name, value in zip(parameter_names, best_params):
@@ -199,7 +213,7 @@ def run_inference_for_cell(
         Dictionary with keys:
         - 'times': Input time array
         - 'observations': 2D array of shape (n_times, 2) with nuclear and cytoplasmic data
-        - 'best_fit_parameters': Array of 6 fitted parameters
+        - 'best_fit_parameters': Array of 8 fitted parameters
         - 'parameter_names': List of parameter names
 
     Raises:
@@ -221,7 +235,7 @@ def run_inference_for_cell(
         'times': times,
         'observations': observations,
         'best_fit_parameters': best_params,
-        'parameter_names': ['alpha', 'alpha0', 'beta', 'hill', 'mrna_half_life', 'p_half_life'],
+        'parameter_names': ['alpha', 'alpha0', 'beta', 'hill', 'K_m', 'T_e', 'mrna_half_life', 'p_half_life'],
     }
 
     return results
