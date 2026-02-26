@@ -42,12 +42,9 @@ class ProteinCalibration:
         self.mass_ng, self.fluorescence_au = self._load_calibration_file()
 
         # Create interpolation function (fluorescence -> mass)
-        self.interp_func = interp1d(
-            self.fluorescence_au,
-            self.mass_ng,
-            kind='linear',
-            fill_value='extrapolate'
-        )
+        # self.interp_func = interp1d(self.fluorescence_au,self.mass_ng,kind='linear',fill_value='extrapolate')
+        self.slope, self.intercept = np.polyfit(self.mass_ng, self.fluorescence_au, 1)
+        self.interp_func = lambda x: self.slope / np.asarray(x) - self.intercept
 
     def _load_calibration_file(self) -> tuple[np.ndarray, np.ndarray]:
         """
@@ -88,7 +85,7 @@ class ProteinCalibration:
         pixel_intensities = np.asarray(pixel_intensities)
 
         # Convert pixel intensities to fluorescence in arbitrary units
-        fluorescence_au = pixel_intensities * PIXEL_TO_AU_FACTOR
+        fluorescence_au = pixel_intensities / PIXEL_TO_AU_FACTOR
 
         # Convert fluorescence to mass in nanograms
         mass_ng = self.interp_func(fluorescence_au)
@@ -104,5 +101,6 @@ class ProteinCalibration:
 
         # Convert to molecules
         molecules = moles * AVOGADRO
+        molecules[np.where(molecules<0)] = 0
 
         return molecules
